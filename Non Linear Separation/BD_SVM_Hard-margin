@@ -1,0 +1,186 @@
+import numpy as np
+from cvxopt import matrix, solvers
+import pandas as pd
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold
+
+
+def rbf_kernel(x, z, gamma=0.5):
+    return np.exp(-gamma * np.linalg.norm(x - z)**2)
+
+
+def gram_matrix(X, y, kernel):
+    n = len(X)
+    K = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            K[i, j] = y[i] * y[j] * kernel(X[i], X[j])
+    return K
+
+# on résout le dual du SVM avec noyau via cvxopt
+def svm_kernel_train(X, y, kernel):
+    n = len(X)
+    K = np.zeros((n,n))
+    for i in range(n):
+        for j in range(n):
+            K[i,j] = y[i] * y[j] * kernel(X[i], X[j])
+
+    P = matrix(K)
+    q = matrix(-np.ones(n))
+    G = matrix(-np.eye(n))   # λ ≥ 0 → -λ ≤ 0
+    h = matrix(np.zeros(n))
+    A = matrix(y.astype(float), (1,n))
+    b = matrix(0.0)
+
+    sol = solvers.qp(P, q, G, h, A, b)
+    lambd = np.ravel(sol['x'])
+
+    return lambd
+
+
+
+def compute_bias(X, y, lambd, kernel):
+    sv = np.where(lambd > 1e-6)[0]  # indices des supports
+    k = sv[0]
+
+    s = 0
+    for i in sv:
+        s += lambd[i] * y[i] * kernel(X[i], X[k])
+
+    b = y[k] - s
+    return b
+
+
+def predict(x, X, y, lambd, b, kernel):
+    s = 0
+    for i in range(len(X)):
+        if lambd[i] > 1e-6:
+            s += lambd[i] * y[i] * kernel(X[i], x)
+    return np.sign(s + b)
+
+
+def compute_accuracy(X_eval, y_eval, X_train, y_train, lambd, b, kernel):
+    preds = np.array([
+        predict(x, X_train, y_train, lambd, b, kernel)
+        for x in X_eval
+    ])
+    return (preds == y_eval).mean()
+
+
+
+
+#import des données
+
+df = pd.read_csv('/Users/bilaldelais/Desktop/SVME/data/HeartAche_1.csv', sep=';')
+print(df.head())
+
+X = df.drop(columns=['HeartDisease'])
+y = df['HeartDisease'].values
+y = y * 2 - 1   # 0 → -1 et 1 → +1
+
+
+cat_cols = X.select_dtypes(include=['object']).columns.tolist()
+num_cols = X.select_dtypes(exclude=['object']).columns.tolist()
+
+X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, random_state=0
+)
+preprocess = ColumnTransformer([
+    ("cat", OneHotEncoder(), cat_cols),
+    ("num", StandardScaler(), num_cols)
+])
+
+X_train = preprocess.fit_transform(X_train_raw)
+X_test  = preprocess.transform(X_test_raw)
+
+
+
+kernel = lambda a, b: rbf_kernel(a, b, gamma=2.0)
+
+lambd = svm_kernel_train(X_train, y_train, kernel)
+b = compute_bias(X_train, y_train, lambd, kernel)
+
+print("Lambdas :", lambd)
+print("b =", b)
+
+correct = 0
+for i in range(len(X_test)):
+    pred = predict(X_test[i], X_train, y_train, lambd, b, kernel)
+    if pred == y_test[i]:
+        correct += 1
+
+accuracy = correct / len(X_test)
+print("Accuracy :", accuracy)
+
+
+def cross_validate_gamma(X, y, gammas, n_splits=5, random_state=0):
+    """
+    Validation croisée k-fold pour choisir gamma.
+
+    X : données d'entrée (déjà prétraitées)
+    y : labels (-1, +1)
+    gammas : liste de valeurs de gamma à tester
+    n_splits : nombre de folds (par défaut 5)
+    """
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    results = {}
+
+    for gamma in gammas:
+        print(f"\n===== Testing gamma = {gamma} =====")
+        accs = []
+
+        # définir le noyau pour cette valeur de gamma
+        kernel = lambda a, b, g=gamma: rbf_kernel(a, b, gamma=g)
+
+        # boucle sur les folds
+        for fold_idx, (train_idx, val_idx) in enumerate(kf.split(X)):
+            X_tr, X_val = X[train_idx], X[val_idx]
+            y_tr, y_val = y[train_idx], y[val_idx]
+
+            # entraînement sur le fold d'entraînement
+            lambd = svm_kernel_train(X_tr, y_tr, kernel)
+            b = compute_bias(X_tr, y_tr, lambd, kernel)
+
+            # évaluation sur le fold de validation
+            preds = np.array([
+                predict(x, X_tr, y_tr, lambd, b, kernel) for x in X_val
+            ])
+            acc = (preds == y_val).mean()
+            accs.append(acc)
+
+            print(f"Fold {fold_idx+1} accuracy = {acc:.3f}")
+
+        mean_acc = np.mean(accs)
+        results[gamma] = mean_acc
+        print(f"--> Mean CV accuracy for gamma={gamma} : {mean_acc:.3f}")
+
+    # meilleur gamma
+    best_gamma = max(results, key=results.get)
+    best_acc = results[best_gamma]
+    print("\n===== Cross-validation result =====")
+    print(f"Best gamma = {best_gamma} with mean CV accuracy = {best_acc:.3f}")
+
+    return best_gamma, best_acc, results
+
+gammas_to_try = [0.1, 0.3, 0.5, 1, 2, 5]
+
+best_gamma, best_cv_acc, cv_results = cross_validate_gamma(
+    X_train, y_train, gammas_to_try, n_splits=5, random_state=0
+)
+
+# Ré-entraînement final sur tout le train avec le meilleur gamma
+kernel = lambda a, b, g=best_gamma: rbf_kernel(a, b, gamma=g)
+lambd = svm_kernel_train(X_train, y_train, kernel)
+b = compute_bias(X_train, y_train, lambd, kernel)
+
+print(f"\nFinal model trained with gamma = {best_gamma}")
+train_acc = compute_accuracy(X_train, y_train, X_train, y_train, lambd, b, kernel)
+test_acc  = compute_accuracy(X_test,  y_test,  X_train, y_train, lambd, b, kernel)
+
+print(f"Train accuracy : {train_acc:.3f}")
+print(f"Test accuracy  : {test_acc:.3f}")
+
+
+
