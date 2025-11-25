@@ -1,0 +1,181 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ================================================================
+# (0) Création d’un dataset linéairement séparable dans R²
+#     → Ce sont les points (x_i, y_i) du SVM
+# ================================================================
+np.random.seed(0)
+
+n_per_class = 20
+
+# Points de la classe +1
+X_pos = np.random.randn(n_per_class, 2) * 0.3 + np.array([2, 2])
+y_pos = np.ones(n_per_class)
+
+# Points de la classe -1
+X_neg = np.random.randn(n_per_class, 2) * 0.3 + np.array([0, 0])
+y_neg = -np.ones(n_per_class)
+
+# Concaténation
+X = np.vstack([X_pos, X_neg])        # matrice des données, shape (n,2)
+y = np.hstack([y_pos, y_neg])        # labels +1 / -1, shape (n,)
+n = X.shape[0]
+
+# Visualisation simple
+plt.scatter(X[y==1, 0], X[y==1, 1], label="y=1")
+plt.scatter(X[y==-1, 0], X[y==-1, 1], label="y=-1")
+plt.legend()
+plt.title("Données linéairement séparables")
+plt.show()
+
+
+
+# ================================================================
+# (1) Construction de la matrice A = -(y_k * u_k)^T
+#
+#   ★ Théorie : on reformule la contrainte SVM :
+#       y_k (w·x_k + b) ≥ 1   <=>   -(y_k)(b + w·x_k) ≤ -1
+#
+#   On écrit alors la contrainte sous forme linéaire :
+#       a_k^T w̃ ≤ -1
+#   où w̃ = (b, w1, w2)
+#   et a_k = -(y_k)(1, x1, x2).
+#
+#   A regroupe donc toutes les contraintes.
+# ================================================================
+
+# vecteur augmenté u_k = (1, x_k1, x_k2)
+U = np.hstack([np.ones((n, 1)), X])   # shape (n,3)
+
+# chaque ligne A[k,:] = -(y_k * u_k)
+A = - (y[:, np.newaxis] * U)          # shape (n,3)
+
+
+
+# ================================================================
+# (2) Calcul de la matrice de Gram G = A A^T
+#
+#   ★ Théorie SVM dual :
+#       Le dual contient des termes (a_i^T a_j)
+#       → donc la matrice de Gram du dual est G_{ij} = a_i^T a_j.
+#
+#   ★ Ceci correspond exactement à la structure :
+#       λᵀ G λ = Σ_i Σ_j λ_i λ_j y_i y_j (x_i^T x_j)
+#
+#   ★ C'est le fondement du kernel trick (on pourrait remplacer
+#     G par K avec K_ij = k(x_i,x_j)).
+# ================================================================
+
+G = A @ A.T     # Gram matrix (n,n)
+
+
+
+# ================================================================
+# (3) Résolution du dual
+#
+#   Dual simplifié (marge dure, sans contrainte Σ α_i y_i = 0) :
+#
+#       minimize  φ(α) = 1/2 α^T G α - 1^T α
+#       sous α ≥ 0
+#
+#   ★ Cela correspond au dual du SVM linéaire marge dure,
+#     mais avec le biais absorbé dans w̃.
+#
+#   ★ On utilise une descente de gradient projetée :
+#         α ← α - η·∇φ(α)
+#         α ← max(α, 0)
+#
+#     Ce qui est valide car φ est convexe.
+# ================================================================
+
+alpha = np.zeros(n)
+eta = 0.01         # pas d’apprentissage
+n_iter = 5000
+ones = np.ones(n)
+
+for _ in range(n_iter):
+    # Gradient du dual : ∇φ = G α - 1
+    grad = G @ alpha - ones
+    
+    # Descente de gradient
+    alpha = alpha - eta * grad
+    
+    # Projection sur le domaine convexe α ≥ 0 (KKT)
+    alpha = np.maximum(alpha, 0.0)
+
+
+
+# ================================================================
+# (4) Reconstruction du primal : w̃ = - A^T α
+#
+#   ★ Théorie (stationnarité KKT) :
+#       ∂L/∂w̃ = 0   ⇒   w̃ = -A^T α
+#
+#   ★ Ici w̃ = (b, w1, w2) car on a absorbé le biais dans le vecteur.
+# ================================================================
+
+w_tilde = - A.T @ alpha     # shape (3,)
+w0 = w_tilde[0]             # b
+w = w_tilde[1:]             # w ∈ R²
+
+print("w0 =", w0)
+print("w  =", w)
+
+
+
+# ================================================================
+# (5) Fonction de décision f(x) = w0 + w·x
+#
+#   ★ Théorie :
+#       f(x) = b + wᵀ x
+#       ŷ = sign(f(x))
+# ================================================================
+
+def f(w0, w, z):
+    z = np.asarray(z)
+    return w0 + np.dot(w, z)
+
+print("f sur le premier point :", f(w0, w, X[0]))
+
+
+
+# ================================================================
+# (6) Prédiction sur l'ensemble d'entraînement
+# ================================================================
+
+def predict(X):
+    scores = w0 + X @ w
+    y_pred = np.sign(scores)
+    y_pred[y_pred == 0] = 1
+    return y_pred
+
+y_hat = predict(X)
+
+print("Précision sur l'ensemble d'entraînement :", np.mean(y_hat == y))
+
+
+
+# ================================================================
+# (7) Visualisation de la frontière de décision
+#
+#   ★ Théorie :
+#       Frontière = { x : w·x + b = 0 }
+#       Demi-plans séparés par cette droite : y=+1 et y=-1
+# ================================================================
+
+xmin, xmax = X[:,0].min() - 1, X[:,0].max() + 1
+ymin, ymax = X[:,1].min() - 1, X[:,1].max() + 1
+
+xx, yy = np.meshgrid(np.linspace(xmin, xmax, 200),
+                     np.linspace(ymin, ymax, 200))
+
+grid = np.c_[xx.ravel(), yy.ravel()]
+zz = predict(grid).reshape(xx.shape)
+
+plt.contourf(xx, yy, zz, alpha=0.2)
+plt.scatter(X[y==1, 0], X[y==1, 1], label="y=1")
+plt.scatter(X[y==-1, 0], X[y==-1, 1], label="y=-1")
+plt.title("Frontière SVM linéaire (dual résolu numériquement)")
+plt.legend()
+plt.show()
