@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 # Fichier à adapter si besoin
 # On définit juste le chemin du CSV ici :
 
-csv_path = "Echec4_T.csv"  
+#csv_path = "Echec4_T.csv"  
 #csv_path = "Echec4_L.csv"  
-#csv_path = "HeartAche_1.csv" 
+csv_path = "HeartAche_1.csv" 
 
 
 def load_csv_auto(path):
@@ -45,6 +45,8 @@ feature_cols = [c for c in df.columns if c != label_col]
 df_X = df[feature_cols]
 u_raw = df[label_col].to_numpy()
 
+
+#dummies 
 from sklearn.model_selection import train_test_split
 
 # Encodage des variables catégorielles en variables numériques (one-hot)
@@ -59,6 +61,32 @@ X_train, X_test, y_train, y_test = train_test_split(
     X_all, u_raw, test_size=0.2, random_state=0, shuffle=True, stratify=u_raw
 )
 
+
+'''#Sans dummies en supprimant les colonnes catégorielles 
+
+from sklearn.model_selection import train_test_split
+
+# Suppression des variables catégorielles : on ne garde que les colonnes numériques
+# (pour HeartAche_1.csv, ça garde typiquement :
+#  Age, RestingBP, Cholesterol, FastingBS, MaxHR, Oldpeak)
+df_X_numeric = df_X.select_dtypes(include=[np.number])
+
+# Matrice numérique de toutes les features
+X_all = df_X_numeric.to_numpy(dtype=float)
+
+# Split train / test sur les données numériques
+X_train, X_test, y_train, y_test = train_test_split(
+    X_all, u_raw, test_size=0.2, random_state=0, shuffle=True, stratify=u_raw
+)'''
+
+from sklearn.preprocessing import StandardScaler
+
+# Standardisation des features (moyenne 0, variance 1) sur l'ensemble d'entraînement ===> Z Score !!!!!!
+
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
 # Normalisation des étiquettes en {-1, 1} sur l'ensemble d'entraînement
 labels = np.unique(y_train)
 if set(labels) == {0, 1}:
@@ -70,7 +98,7 @@ else:
 X = X_train
 n = X.shape[0]
 
-# Visualisation des données (projection PCA en 2D pour inspection rapide)
+'''# Visualisation des données (projection PCA en 2D pour inspection rapide)
 from sklearn.decomposition import PCA
 pca_vis = PCA(n_components=2)
 X_vis = pca_vis.fit_transform(X)
@@ -80,7 +108,7 @@ plt.scatter(X_vis[y == 1, 0], X_vis[y == 1, 1], label="y=1")
 plt.scatter(X_vis[y == -1, 0], X_vis[y == -1, 1], label="y=-1")
 plt.legend()
 plt.title("Données projetées en PCA (2D) — non linéairement séparables")
-plt.show()
+plt.show()'''
 
 # ==========================
 # 1) Définition du noyau RBF
@@ -182,7 +210,7 @@ b_eq = matrix(np.zeros(1))
 solution = solvers.qp(P, q, G, h, a, b_eq)
 alpha = np.array(solution['x']).flatten()
 
-# ================
+'''# ================
 # (Optionnel) Simplified SMO step (not used in main solver)
 # ================
 def smo_step(i, j, alpha, y, K, C):
@@ -198,7 +226,7 @@ def smo_step(i, j, alpha, y, K, C):
     alpha[i] = alpha_i
     alpha[j] = alpha_j
     return alpha
-
+'''
 # =========================
 # 4) Calcul du biais b
 # =========================
@@ -251,11 +279,96 @@ y_pred_test = predict(X_test)
 y_test_norm = np.where(y_test == 0, -1, 1)
 print("Précision TEST :", np.mean(y_pred_test == y_test_norm))
 
+# =========================
+# 2) Boucle sur plusieurs valeurs de (C, gamma)
+# =========================
 
 
 
 
+from cvxopt import matrix, solvers
+solvers.options['show_progress'] = False
 
+def train_svm_rbf_single(C, gamma, X, y, X_test, y_test):
+    """
+    Entraîne TON SVM (exactement comme ton code original)
+    pour un couple (C, gamma), et renvoie :
+    - nombre de vecteurs de support
+    - valeur de b
+    - précision train
+    - précision test
+    """
+    n = X.shape[0]
+
+    # Matrice de Gram
+    K = rbf_kernel(X, X, gamma=gamma)
+
+    # Matrice Q du dual : y_i y_j K(x_i, x_j)
+    Q = (y[:, None] * y[None, :]) * K
+
+    # QP : min 1/2 a^T Q a − 1^T a
+    P = matrix(Q)
+    q = matrix(-np.ones(n))
+
+    # Contraintes 0 ≤ α ≤ C
+    G = matrix(np.vstack([-np.eye(n), np.eye(n)]))
+    h = matrix(np.hstack([np.zeros(n), C * np.ones(n)]))
+
+    # Egalité : y^T α = 0
+    A = matrix(y.reshape(1, -1))
+    b_eq = matrix(np.zeros(1))
+
+    sol = solvers.qp(P, q, G, h, A, b_eq)
+    alpha = np.array(sol['x']).flatten()
+
+    # Vecteurs de support marginaux
+    support_idx = np.where((alpha > 1e-5) & (alpha < C - 1e-5))[0]
+    if support_idx.size == 0:
+        support_idx = np.where(alpha > 1e-5)[0]
+
+    # Calcul de b
+    b_vals = []
+    for i in support_idx:
+        s = np.sum(alpha * y * K[:, i])
+        b_vals.append(y[i] - s)
+    b = np.mean(b_vals)
+
+    # Définition des prédicteurs
+    def decision_function(X_new):
+        K_new = rbf_kernel(X_new, X, gamma=gamma)
+        return K_new @ (alpha * y) + b
+
+    def predict(X_new):
+        s = decision_function(X_new)
+        y_pred = np.sign(s)
+        y_pred[y_pred == 0] = 1
+        return y_pred
+
+    # Accuracy train
+    y_hat_train = predict(X)
+    train_acc = np.mean(y_hat_train == y)
+
+    # Accuracy test
+    y_test_norm = np.where(y_test == 0, -1, 1)
+    y_hat_test = predict(X_test)
+    test_acc = np.mean(y_hat_test == y_test_norm)
+
+    return support_idx.size, b, train_acc, test_acc
+
+Cs = [0.01, 0.05, 0.1, 1.0, 10.0]
+gammas = [0.01, 0.1, 1.0, 10.0]
+
+for C in Cs:
+    for gamma in gammas:
+        sv_count, b_val, train_acc, test_acc = train_svm_rbf_single(C, gamma, X, y, X_test, y_test)
+        print(f"=== C={C}, gamma={gamma} ===")
+        print(f"  Nombre de vecteurs de support : {sv_count}")
+        print(f"  b = {b_val}")
+        print(f"  Précision TRAIN : {train_acc:.3f}")
+        print(f"  Précision TEST  : {test_acc:.3f}")
+        print()
+
+'''
 # =========================
 # 6) Visualisation PCA (2D)
 # =========================
@@ -290,4 +403,4 @@ plt.scatter(X2[y == 1, 0], X2[y == 1, 1], label="y=1")
 plt.scatter(X2[y == -1, 0], X2[y == -1, 1], label="y=-1")
 plt.legend()
 plt.title("SVM noyau RBF — visualisation PCA (2D)")
-plt.show()
+plt.show()'''
